@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TravelIP</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%2305070d' stroke='%234ce0ff' stroke-width='1.5'/%3E%3Cpath d='M1 16h30M16 1c5 4 5 26 0 30M16 1c-5 4-5 26 0 30M4 9h24M4 23h24' stroke='%234ce0ff' stroke-width='1' fill='none' opacity='0.55'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%234ce0ff'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="map"></div>
+      <div id="hop-label-card"></div>
+
+      <header id="search-bar">
+        <input id="target-input" type="text" placeholder="Enter a domain or IP (e.g. github.com)" autocomplete="off" />
+        <select id="mode-select" title="Trace mode">
+          <option value="icmp">ICMP</option>
+          <option value="tcp">TCP (SYN)</option>
+        </select>
+        <button id="go-btn" type="button">Trace</button>
+      </header>
+
+      <aside id="hop-panel">
+        <h2>Hops</h2>
+        <div id="hop-list"></div>
+      </aside>
+
+      <div id="status-bar"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
