@@ -121,7 +121,18 @@ is no separate lint/typecheck command.
   Public IPs check the SQLite cache (30-day TTL, cache hits never touch the
   network), batch-lookup the rest via ip-api.com (rate limited to 45
   calls/min), falling back to ipwho.is per-IP for anything the batch call
-  missed.
+  missed. Whatever still has no coordinates after all that (private/cgnat,
+  or a public IP both providers failed on) gets one last resort via
+  `_apply_hostname_inference`: parse its reverse-DNS hostname for an IATA
+  airport code (`backend/airports.py`) and use that city, marked
+  `inferred: true`, `source: "hostname-inference"`. Never overrides a real
+  result and is never cached.
+
+- `airports.py` — the IATA-code table and hostname parser behind the
+  hostname-inference fallback above. Deliberately a curated subset (major
+  hub metros only, not all ~9000 IATA codes) and deliberately excludes a
+  couple of real codes that collide with common networking terms (see the
+  comment above `_LABEL_RE`) — read that comment before adding codes.
 
 - `validation.py` — validates/normalizes the user-supplied target before
   it's used to build subprocess argv. Subprocess is invoked with

@@ -79,11 +79,12 @@ async def _geo_lookup_and_queue(
     result = await geo.lookup_one(ip)
 
     # Hop 1 is almost always this machine's own router/gateway -- a private
-    # IP with no real geolocation of its own. Rather than leave it
-    # unmappable, pin it to the origin's known location (which we already
-    # have) and mark it `inferred` so the frontend can show it as an
-    # assumption, not a measurement.
-    if hop_num == 1 and result.get("kind") != "public" and origin and origin.get("lat") is not None and origin.get("lon") is not None:
+    # IP with no real geolocation of its own. If geo.py's own last-resort
+    # hostname inference (see backend/airports.py) already found it a more
+    # specific location, that wins; otherwise pin it to the origin's known
+    # location as a coarser fallback. Either way it's marked `inferred` so
+    # the frontend shows it as an assumption, not a measurement.
+    if hop_num == 1 and result.get("lat") is None and origin and origin.get("lat") is not None and origin.get("lon") is not None:
         result = {
             **result,
             "country": origin.get("country"),

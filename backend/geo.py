@@ -13,6 +13,11 @@ Lookup pipeline for a batch of IPs:
      (up to 100 IPs per call, capped at 45 calls/min). Any IP the batch
      call fails to resolve falls back to ipwho.is, looked up individually.
   5. Fresh results are written back to the cache.
+  6. Anything still without a location (private/cgnat, or a public IP both
+     providers failed on) gets one last resort: parse its reverse-DNS
+     hostname for an IATA airport code (see backend/airports.py) and use
+     that city as an `inferred` location. Never overrides a real result,
+     never cached (it's a guess, not a fact).
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from typing import Optional
 
 import httpx
 
+from backend.airports import find_airport_code_in_hostname
 from backend.db import get_db
 
 CACHE_TTL_SECONDS = 30 * 24 * 3600  # 30 days
@@ -191,6 +197,27 @@ class GeoService:
         except Exception:
             return None
 
+    def _apply_hostname_inference(self, entry: dict, host: Optional[str]) -> dict:
+        """Last resort: if `entry` still has no coordinates, try to pull a
+        city out of `host` via an IATA airport code. Never overrides a
+        result that already has a real lat/lon.
+        """
+        if entry.get("lat") is not None:
+            return entry
+        hit = find_airport_code_in_hostname(host)
+        if not hit:
+            return entry
+        return {
+            **entry,
+            "country": hit["country"],
+            "country_code": hit["country_code"],
+            "city": hit["city"],
+            "lat": hit["lat"],
+            "lon": hit["lon"],
+            "inferred": True,
+            "source": "hostname-inference",
+        }
+
     # -- providers -----------------------------------------------------------
 
     async def _batch_lookup(self, ips: list[str]) -> dict[str, dict]:
@@ -289,6 +316,7 @@ class GeoService:
             reverses = await asyncio.gather(*(self._reverse_dns(ip) for ip in dns_candidates))
             for ip, host in zip(dns_candidates, reverses):
                 result[ip]["reverse"] = host
+                result[ip] = self._apply_hostname_inference(result[ip], host)
 
         cached = await self._cache_get(public_ips)
         result.update(cached)
@@ -307,7 +335,10 @@ class GeoService:
                     result[ip] = hit
                     fallback_results.append(hit)
                 else:
-                    result[ip] = _empty_geo(ip, "public", source="failed")
+                    entry = _empty_geo(ip, "public", source="failed")
+                    host = await self._reverse_dns(ip)
+                    entry["reverse"] = host
+                    result[ip] = self._apply_hostname_inference(entry, host)
             await self._cache_put(fallback_results)
 
         return result

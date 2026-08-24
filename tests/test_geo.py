@@ -178,6 +178,77 @@ async def test_fallback_used_when_batch_fails_for_an_ip(temp_db):
     assert result["1.2.3.4"]["asn"] == "AS14618"
 
 
+# ---------------------------------------------------------------------------
+# Hostname (airport-code) inference: last resort when nothing else resolved
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_private_ip_gets_hostname_inferred_location_when_code_matches(temp_db, monkeypatch):
+    monkeypatch.setattr(socket, "gethostbyaddr", lambda ip: ("ae0.cr1.lax1.us.example.net", [], [ip]))
+    client = FakeClient()
+    geo = GeoService(client)
+
+    result = await geo.lookup_many(["10.20.20.1"])
+
+    hit = result["10.20.20.1"]
+    assert hit["kind"] == "private"  # the IP's real class is untouched
+    assert hit["inferred"] is True
+    assert hit["source"] == "hostname-inference"
+    assert hit["city"] == "Los Angeles"
+    assert hit["lat"] == pytest.approx(33.9425)
+
+
+@pytest.mark.asyncio
+async def test_private_ip_with_no_matching_code_stays_unmappable(temp_db, monkeypatch):
+    monkeypatch.setattr(socket, "gethostbyaddr", lambda ip: ("customer-modem.home", [], [ip]))
+    client = FakeClient()
+    geo = GeoService(client)
+
+    result = await geo.lookup_many(["192.168.1.1"])
+
+    hit = result["192.168.1.1"]
+    assert hit["inferred"] is False
+    assert hit["lat"] is None
+    assert hit["reverse"] == "customer-modem.home"
+
+
+@pytest.mark.asyncio
+async def test_public_ip_that_fails_both_providers_falls_back_to_hostname_inference(temp_db, monkeypatch):
+    def batch_factory(ips):
+        return [{"status": "fail", "message": "reserved range", "query": ip} for ip in ips]
+
+    def fallback_factory(url):
+        return {"success": False}
+
+    monkeypatch.setattr(socket, "gethostbyaddr", lambda ip: ("core-fra-2.backbone.example.net", [], [ip]))
+    client = FakeClient(batch_payload_factory=batch_factory, fallback_payload_factory=fallback_factory)
+    geo = GeoService(client)
+
+    result = await geo.lookup_many(["5.6.7.8"])
+
+    hit = result["5.6.7.8"]
+    assert hit["kind"] == "public"  # still genuinely a public IP
+    assert hit["inferred"] is True
+    assert hit["source"] == "hostname-inference"
+    assert hit["city"] == "Frankfurt"
+
+
+@pytest.mark.asyncio
+async def test_hostname_inference_never_overrides_a_real_geoip_result(temp_db, monkeypatch):
+    # Even if the hostname happens to contain an airport code, a real
+    # provider result must win -- hostname inference only fires when there
+    # is genuinely no location yet.
+    monkeypatch.setattr(socket, "gethostbyaddr", lambda ip: ("lax1.example.net", [], [ip]))
+    client = FakeClient(batch_payload_factory=lambda ips: [_ok_batch_entry(ip) for ip in ips])
+    geo = GeoService(client)
+
+    result = await geo.lookup_many(["8.8.8.8"])
+
+    assert result["8.8.8.8"]["city"] == "Mountain View"  # from the batch provider, not LAX
+    assert result["8.8.8.8"]["inferred"] is False
+
+
 @pytest.mark.asyncio
 async def test_private_ip_gets_reverse_dns_hostname_when_available(temp_db, monkeypatch):
     monkeypatch.setattr(socket, "gethostbyaddr", lambda ip: ("core1.par1.example.net", [], [ip]))
