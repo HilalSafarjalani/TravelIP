@@ -1,9 +1,8 @@
 import type { Layer } from "@deck.gl/core";
-import { PathLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { PathLayer, ScatterplotLayer } from "@deck.gl/layers";
 import type { Globe } from "./globe";
 import {
   colorForDelta,
-  dashSegments,
   durationForDelta,
   easeInOutQuad,
   easeOutBack,
@@ -35,11 +34,12 @@ interface SettledArc {
   id: string;
   path: LonLat[];
   color: RGB;
-  dashed: boolean;
-  ghostMidpoint?: LonLat;
 }
 
-type Beat = { kind: "move"; to: AnimNode; hop: HopRecord } | { kind: "ghost"; to: AnimNode; hops: HopRecord[] };
+interface Beat {
+  to: AnimNode;
+  hop: HopRecord;
+}
 
 interface ActiveBeat {
   beat: Beat;
@@ -52,8 +52,6 @@ interface ActiveBeat {
 const RIPPLE_DURATION = 900;
 const POP_DURATION = 500;
 const ARRIVAL_PAUSE = 250;
-const GHOST_BASE_DURATION = 550;
-const GHOST_COLOR: RGB = [140, 150, 165];
 const TRAIL_LEN = 34;
 
 /**
@@ -67,7 +65,6 @@ export class AnimationEngine {
   private lastKnownNode: AnimNode | null = null;
   private lastRtt: number | null = null;
   private queue: Beat[] = [];
-  private pendingTimeouts: HopRecord[] = [];
   private playing = false;
   private finished = false;
   private settledArcs: SettledArc[] = [];
@@ -88,7 +85,6 @@ export class AnimationEngine {
     this.lastKnownNode = null;
     this.lastRtt = null;
     this.queue = [];
-    this.pendingTimeouts = [];
     this.playing = false;
     this.finished = false;
     this.settledArcs = [];
@@ -121,13 +117,14 @@ export class AnimationEngine {
     this.onArrive?.(node);
   }
 
-  /** Call once a hop is fully resolved: timeout=true, or its geo has arrived. */
+  /** Call once a hop is fully resolved: timeout=true, or its geo has arrived.
+   * A timeout has no coordinates to draw toward, so it's simply skipped here
+   * -- the *next* resolved hop still gets a real solid arc drawn directly
+   * from the last known point, regardless of how many timeouts came between
+   * them (we don't know the real path through them, but we do know both
+   * endpoints, so there's no reason to fake uncertainty on the line itself). */
   submitHop(hop: HopRecord) {
-    if (hop.timeout) {
-      this.pendingTimeouts.push(hop);
-      this.kick();
-      return;
-    }
+    if (hop.timeout) return;
     const geo = hop.geo;
     if (!geo || geo.kind !== "public" || geo.lat == null || geo.lon == null) {
       // Private/CGNAT/unknown: not mappable, not a timeout -- skip entirely
@@ -150,11 +147,7 @@ export class AnimationEngine {
     };
     this.allPointsForFraming.push([node.lon, node.lat]);
 
-    if (this.pendingTimeouts.length > 0) {
-      this.queue.push({ kind: "ghost", to: node, hops: [...this.pendingTimeouts] });
-      this.pendingTimeouts = [];
-    }
-    this.queue.push({ kind: "move", to: node, hop });
+    this.queue.push({ to: node, hop });
     this.ensureTicking();
     this.kick();
   }
@@ -200,18 +193,11 @@ export class AnimationEngine {
     const path = greatCirclePath(fromLL, toLL, 128);
     const distanceKm = haversineKm(fromLL, toLL);
 
-    let color: RGB;
-    let duration: number;
-    if (beat.kind === "move") {
-      const rtt = beat.hop.avg_rtt;
-      const delta = rtt != null && this.lastRtt != null ? Math.max(0, rtt - this.lastRtt) : (rtt ?? 60);
-      color = colorForDelta(delta);
-      duration = durationForDelta(delta);
-      if (rtt != null) this.lastRtt = rtt;
-    } else {
-      color = GHOST_COLOR;
-      duration = Math.min(GHOST_BASE_DURATION + beat.hops.length * 180, 2000);
-    }
+    const rtt = beat.hop.avg_rtt;
+    const delta = rtt != null && this.lastRtt != null ? Math.max(0, rtt - this.lastRtt) : (rtt ?? 60);
+    const color = colorForDelta(delta);
+    const duration = durationForDelta(delta);
+    if (rtt != null) this.lastRtt = rtt;
 
     const midIdx = Math.floor(path.length / 2);
     this.globe.easeToFrame(path[midIdx], {
@@ -244,12 +230,7 @@ export class AnimationEngine {
     if (!this.activeBeat) return;
     const { beat, path, color } = this.activeBeat;
 
-    if (beat.kind === "ghost") {
-      const midpoint = path[Math.floor(path.length / 2)];
-      this.settledArcs.push({ id: `ghost-${beat.to.id}`, path, color, dashed: true, ghostMidpoint: midpoint });
-    } else {
-      this.settledArcs.push({ id: `arc-${beat.to.id}`, path, color, dashed: false });
-    }
+    this.settledArcs.push({ id: `arc-${beat.to.id}`, path, color });
 
     this.activeBeat = null;
     this.settleNode(beat.to);
@@ -275,51 +256,16 @@ export class AnimationEngine {
     const now = performance.now();
     const layers: Layer[] = [];
 
-    const solidArcs = this.settledArcs.filter((a) => !a.dashed);
-    const ghostArcs = this.settledArcs.filter((a) => a.dashed);
-
-    if (solidArcs.length > 0) {
+    if (this.settledArcs.length > 0) {
       layers.push(
         new PathLayer<SettledArc>({
           id: "settled-arcs",
-          data: solidArcs,
+          data: this.settledArcs,
           getPath: (d) => d.path,
           getColor: (d) => [d.color[0], d.color[1], d.color[2], 200],
           getWidth: 2,
           widthUnits: "pixels",
           pickable: false,
-        })
-      );
-    }
-
-    if (ghostArcs.length > 0) {
-      const dashData: { path: LonLat[] }[] = [];
-      for (const g of ghostArcs) {
-        for (const seg of dashSegments(g.path)) dashData.push({ path: seg });
-      }
-      layers.push(
-        new PathLayer<{ path: LonLat[] }>({
-          id: "ghost-arcs",
-          data: dashData,
-          getPath: (d) => d.path,
-          getColor: [150, 158, 172, 150],
-          getWidth: 1.5,
-          widthUnits: "pixels",
-          pickable: false,
-        })
-      );
-
-      const pulse = 0.5 + 0.5 * Math.sin(now / 420);
-      layers.push(
-        new TextLayer<SettledArc>({
-          id: "ghost-markers",
-          data: ghostArcs,
-          getPosition: (d) => d.ghostMidpoint as LonLat,
-          getText: () => "?",
-          getSize: 14 + pulse * 4,
-          getColor: [170, 178, 190, Math.round(140 + pulse * 100)],
-          fontFamily: "monospace",
-          fontWeight: 700,
         })
       );
     }

@@ -87,18 +87,3 @@ export function easeInOutQuad(t: number): number {
   const x = Math.min(Math.max(t, 0), 1);
   return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
 }
-
-/** Splits a path into alternating visible/gap chunks to fake a dashed line (deck.gl PathLayer has no native dash support). */
-export function dashSegments(path: LonLat[], dashLen = 3, gapLen = 2): LonLat[][] {
-  const segments: LonLat[][] = [];
-  let i = 0;
-  let visible = true;
-  while (i < path.length - 1) {
-    const runLen = visible ? dashLen : gapLen;
-    const end = Math.min(i + runLen, path.length - 1);
-    if (visible) segments.push(path.slice(i, end + 1));
-    i = end;
-    visible = !visible;
-  }
-  return segments;
-}
