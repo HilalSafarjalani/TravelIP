@@ -25,6 +25,8 @@ export interface AnimNode {
   isp: string | null;
   avgRtt: number | null;
   isOrigin: boolean;
+  /** Location assumed from the origin (e.g. hop 1's own router), not measured. */
+  inferred: boolean;
   hopLabel: string;
   /** performance.now() timestamp this node "landed" -- drives pop/ripple fx. */
   arrivedAt: number;
@@ -107,6 +109,7 @@ export class AnimationEngine {
       isp: origin.isp ?? origin.org,
       avgRtt: 0,
       isOrigin: true,
+      inferred: false,
       hopLabel: "Origin (this machine)",
       arrivedAt: performance.now(),
     };
@@ -126,9 +129,11 @@ export class AnimationEngine {
   submitHop(hop: HopRecord) {
     if (hop.timeout) return;
     const geo = hop.geo;
-    if (!geo || geo.kind !== "public" || geo.lat == null || geo.lon == null) {
-      // Private/CGNAT/unknown: not mappable, not a timeout -- skip entirely
-      // (still shown in the hop list, just never touches the globe).
+    // Mappable if genuinely public, or if a location was inferred from the
+    // origin (e.g. hop 1's own router). Anything else -- private/CGNAT/
+    // unknown with no inferred location -- is skipped entirely (still shown
+    // in the hop list, just never touches the globe).
+    if (!geo || geo.lat == null || geo.lon == null || !(geo.kind === "public" || geo.inferred)) {
       return;
     }
     const node: AnimNode = {
@@ -142,6 +147,7 @@ export class AnimationEngine {
       isp: geo.isp ?? geo.org,
       avgRtt: hop.avg_rtt,
       isOrigin: false,
+      inferred: geo.inferred,
       hopLabel: `Hop ${hop.hop}`,
       arrivedAt: 0,
     };
@@ -282,8 +288,11 @@ export class AnimationEngine {
         data: nodeData,
         getPosition: (d) => [d.node.lon, d.node.lat],
         getRadius: (d) => (d.node.isOrigin ? 65000 : 42000) * Math.max(d.scale, 0),
-        getFillColor: (d) => (d.node.isOrigin ? [76, 224, 255, 235] : [255, 200, 120, 225]),
-        getLineColor: [255, 255, 255, 180],
+        getFillColor: (d) => {
+          if (d.node.isOrigin) return [76, 224, 255, 235];
+          return d.node.inferred ? [255, 200, 120, 90] : [255, 200, 120, 225];
+        },
+        getLineColor: (d) => (d.node.inferred ? [255, 255, 255, 120] : [255, 255, 255, 180]),
         lineWidthMinPixels: 1,
         stroked: true,
         radiusUnits: "meters",

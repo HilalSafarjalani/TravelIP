@@ -73,8 +73,31 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-async def _geo_lookup_and_queue(geo: GeoService, hop_num: int, ip: str, queue: "asyncio.Queue"):
+async def _geo_lookup_and_queue(
+    geo: GeoService, hop_num: int, ip: str, queue: "asyncio.Queue", origin: Optional[dict]
+):
     result = await geo.lookup_one(ip)
+
+    # Hop 1 is almost always this machine's own router/gateway -- a private
+    # IP with no real geolocation of its own. Rather than leave it
+    # unmappable, pin it to the origin's known location (which we already
+    # have) and mark it `inferred` so the frontend can show it as an
+    # assumption, not a measurement.
+    if hop_num == 1 and result.get("kind") != "public" and origin and origin.get("lat") is not None and origin.get("lon") is not None:
+        result = {
+            **result,
+            "country": origin.get("country"),
+            "country_code": origin.get("country_code"),
+            "city": origin.get("city"),
+            "lat": origin.get("lat"),
+            "lon": origin.get("lon"),
+            "isp": origin.get("isp"),
+            "org": origin.get("org"),
+            "asn": origin.get("asn"),
+            "as_name": origin.get("as_name"),
+            "inferred": True,
+        }
+
     await queue.put(("geo", {"hop": hop_num, **result}))
 
 
@@ -120,7 +143,7 @@ async def _trace_event_stream(app: FastAPI, target: str, mode: str):
                     hops[hop["hop"]] = hop
                     await queue.put(("hop", hop))
                     if hop.get("ip"):
-                        task = asyncio.create_task(_geo_lookup_and_queue(geo, hop["hop"], hop["ip"], queue))
+                        task = asyncio.create_task(_geo_lookup_and_queue(geo, hop["hop"], hop["ip"], queue, origin))
                         geo_tasks.append(task)
             except TcpModeUnavailable as exc:
                 await queue.put(("error", {"message": str(exc)}))

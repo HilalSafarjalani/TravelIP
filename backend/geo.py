@@ -3,18 +3,23 @@
 Lookup pipeline for a batch of IPs:
   1. Classify each IP (private / cgnat / public / unknown). Only "public"
      IPs are ever sent to a geolocation provider.
-  2. Check the SQLite cache (30-day TTL) for public IPs. Cache hits never
+  2. Private/cgnat IPs get a best-effort reverse DNS (PTR) lookup instead --
+     no coordinates (there are none to find), but a hostname occasionally
+     hints at a real location. Never cached: a private IP's meaning is
+     specific to whatever network it was seen on.
+  3. Check the SQLite cache (30-day TTL) for public IPs. Cache hits never
      touch the network.
-  3. Remaining public IPs are looked up via ip-api.com's batch endpoint
+  4. Remaining public IPs are looked up via ip-api.com's batch endpoint
      (up to 100 IPs per call, capped at 45 calls/min). Any IP the batch
      call fails to resolve falls back to ipwho.is, looked up individually.
-  4. Fresh results are written back to the cache.
+  5. Fresh results are written back to the cache.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import socket
 import time
 from collections import deque
 from typing import Optional
@@ -33,6 +38,7 @@ RATE_LIMIT_CALLS = 45
 RATE_LIMIT_WINDOW_S = 60.0
 
 _CGNAT_V4 = ipaddress.ip_network("100.64.0.0/10")
+REVERSE_DNS_TIMEOUT_S = 1.5
 
 
 def classify_ip(ip_str: str) -> str:
@@ -59,7 +65,7 @@ def classify_ip(ip_str: str) -> str:
     return "public"
 
 
-def _empty_geo(ip: str, kind: str, source: str = "none") -> dict:
+def _empty_geo(ip: str, kind: str, source: str = "none", reverse: Optional[str] = None) -> dict:
     return {
         "ip": ip,
         "kind": kind,
@@ -72,8 +78,9 @@ def _empty_geo(ip: str, kind: str, source: str = "none") -> dict:
         "org": None,
         "asn": None,
         "as_name": None,
-        "reverse": None,
+        "reverse": reverse,
         "source": source,
+        "inferred": False,
     }
 
 
@@ -163,6 +170,27 @@ class GeoService:
         )
         await db.commit()
 
+    # -- reverse DNS (private/cgnat hops only; public hops get it from the
+    #    geolocation provider's own "reverse" field instead) -----------------
+
+    async def _reverse_dns(self, ip: str) -> Optional[str]:
+        """Best-effort PTR lookup for a non-public IP. Most private-network
+        addresses have no reverse record at all, but some ISP-internal
+        backbone hops do, and a hostname there can hint at a real location
+        (e.g. "par1-core.example.net") without us inventing coordinates.
+        Never raises; a failed or slow (>REVERSE_DNS_TIMEOUT_S) lookup just
+        yields None.
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            host, _aliases, _addrs = await asyncio.wait_for(
+                loop.run_in_executor(None, socket.gethostbyaddr, ip),
+                timeout=REVERSE_DNS_TIMEOUT_S,
+            )
+            return host
+        except Exception:
+            return None
+
     # -- providers -----------------------------------------------------------
 
     async def _batch_lookup(self, ips: list[str]) -> dict[str, dict]:
@@ -202,6 +230,7 @@ class GeoService:
                     "as_name": entry.get("asname"),
                     "reverse": entry.get("reverse") or None,
                     "source": "ip-api",
+                    "inferred": False,
                 }
         return out
 
@@ -230,6 +259,7 @@ class GeoService:
             "as_name": conn.get("org"),
             "reverse": None,
             "source": "ipwho.is",
+            "inferred": False,
         }
 
     # -- public API ------------------------------------------------------
@@ -240,6 +270,7 @@ class GeoService:
         """
         result: dict[str, dict] = {}
         public_ips: list[str] = []
+        dns_candidates: list[str] = []
         seen: set[str] = set()
 
         for ip in ips:
@@ -247,10 +278,17 @@ class GeoService:
                 continue
             seen.add(ip)
             kind = classify_ip(ip)
-            if kind != "public":
-                result[ip] = _empty_geo(ip, kind, source="local")
-            else:
+            if kind == "public":
                 public_ips.append(ip)
+            else:
+                result[ip] = _empty_geo(ip, kind, source="local")
+                if kind in ("private", "cgnat"):
+                    dns_candidates.append(ip)
+
+        if dns_candidates:
+            reverses = await asyncio.gather(*(self._reverse_dns(ip) for ip in dns_candidates))
+            for ip, host in zip(dns_candidates, reverses):
+                result[ip]["reverse"] = host
 
         cached = await self._cache_get(public_ips)
         result.update(cached)
@@ -313,4 +351,5 @@ class GeoService:
             "as_name": data.get("asname"),
             "reverse": data.get("reverse") or None,
             "source": "ip-api",
+            "inferred": False,
         }

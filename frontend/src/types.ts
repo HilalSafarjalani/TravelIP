@@ -23,6 +23,9 @@ export interface GeoData {
   as_name: string | null;
   reverse: string | null;
   source: string;
+  /** True when lat/lon were assumed from the trace origin (e.g. hop 1's own
+   * router), not measured -- kind still reflects the IP's real class. */
+  inferred: boolean;
 }
 
 export interface OriginData {

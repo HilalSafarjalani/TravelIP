@@ -8,13 +8,23 @@ the API layer: event framing, input validation, and history persistence.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
 import backend.main as main_module
+from backend.geo import classify_ip
 
 
 class FakeGeo:
+    """Mimics the real GeoService's public/private split (see backend.geo)
+    without touching the network: public IPs get canned geo data, anything
+    else comes back unresolved -- same as the real pipeline would, minus the
+    network call. This lets main.py's hop-1 origin-pinning logic (which
+    branches on `kind != "public"`) actually exercise for real in tests.
+    """
+
     def __init__(self, *_args, **_kwargs):
         pass
 
@@ -27,11 +37,30 @@ class FakeGeo:
         }
 
     async def lookup_one(self, ip):
+        kind = classify_ip(ip)
+        if kind != "public":
+            return {
+                "ip": ip, "kind": kind, "country": None, "country_code": None,
+                "city": None, "lat": None, "lon": None, "isp": None, "org": None,
+                "asn": None, "as_name": None, "reverse": None, "source": "local",
+                "inferred": False,
+            }
         return {
             "ip": ip, "kind": "public", "country": "United States", "country_code": "US",
             "city": "Testville", "lat": 1.0, "lon": 2.0, "isp": "ISP", "org": "Org",
             "asn": "AS2", "as_name": "ORG", "reverse": None, "source": "ip-api",
+            "inferred": False,
         }
+
+
+def _sse_events(body: str, event_type: str) -> list[dict]:
+    events = []
+    for chunk in body.split("\n\n"):
+        if not chunk.startswith(f"event: {event_type}"):
+            continue
+        data_line = next(line for line in chunk.splitlines() if line.startswith("data: "))
+        events.append(json.loads(data_line[len("data: "):]))
+    return events
 
 
 async def _fake_stream_traceroute(target):
@@ -91,6 +120,22 @@ def test_trace_streams_all_event_types_including_a_real_timeout(client):
 
     # the two successful hops each got a follow-up geo event
     assert body.count("event: geo") == 2
+
+
+def test_hop_one_private_ip_is_pinned_to_origin(client):
+    resp = client.get("/api/trace", params={"target": "8.8.8.8"})
+    geo_events = _sse_events(resp.text, "geo")
+
+    hop1 = next(e for e in geo_events if e["hop"] == 1)
+    assert hop1["kind"] == "private"  # the IP itself is still reported honestly
+    assert hop1["inferred"] is True
+    assert hop1["lat"] == 10.0
+    assert hop1["lon"] == 20.0
+    assert hop1["city"] == "Somewhere"
+
+    # hop 3 is a genuinely public IP -- never pinned/inferred
+    hop3 = next(e for e in geo_events if e["hop"] == 3)
+    assert hop3["inferred"] is False
 
 
 def test_valid_target_forms_accepted(client):

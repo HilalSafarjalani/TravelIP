@@ -37,9 +37,18 @@ function fmtGeo(hop: HopRecord): string {
   if (hop.timeout) return "request timed out — not mappable";
   const g = hop.geo;
   if (!g) return "resolving location…";
-  if (g.kind === "private") return "local network — not mappable";
-  if (g.kind === "cgnat") return "carrier-grade NAT — not mappable";
-  if (g.kind === "unknown") return "location unknown — not mappable";
+
+  if (g.inferred && g.lat != null && g.lon != null) {
+    const bits = [g.city, g.country].filter(Boolean);
+    const loc = bits.length ? bits.join(", ") : "location unknown";
+    return `${loc} — same as origin (inferred, not measured)`;
+  }
+
+  const hint = g.reverse ? ` · ${g.reverse}` : "";
+  if (g.kind === "private") return `local network — not mappable${hint}`;
+  if (g.kind === "cgnat") return `carrier-grade NAT — not mappable${hint}`;
+  if (g.kind === "unknown") return `location unknown — not mappable${hint}`;
+
   const bits = [g.city, g.country].filter(Boolean);
   const loc = bits.length ? bits.join(", ") : "location unknown";
   const asn = g.asn ? ` · ${g.asn}` : "";
@@ -51,7 +60,7 @@ function renderHopList() {
   const sorted = [...hops.values()].sort((a, b) => a.hop - b.hop);
   hopList.innerHTML = "";
   for (const hop of sorted) {
-    const mappable = hop.geo?.kind === "public";
+    const mappable = hop.geo?.kind === "public" || Boolean(hop.geo?.inferred);
     const row = document.createElement("div");
     row.className = `hop-row ${mappable ? "mappable" : "not-mappable"}`;
     row.innerHTML = `
@@ -72,6 +81,9 @@ function showLabelCard(node: AnimNode) {
   const rttRow = node.isOrigin
     ? ""
     : `<div class="label-rtt">${node.avgRtt != null ? `${node.avgRtt.toFixed(1)} ms avg` : "—"}</div>`;
+  const inferredRow = node.inferred
+    ? `<div class="label-meta">same location as origin — inferred, not measured</div>`
+    : "";
 
   labelCard.innerHTML = `
     <div class="label-flag">${flag}</div>
@@ -79,6 +91,7 @@ function showLabelCard(node: AnimNode) {
       <div class="label-title">${node.hopLabel}</div>
       <div class="label-loc">${loc}</div>
       ${ispBits ? `<div class="label-meta">${ispBits}</div>` : ""}
+      ${inferredRow}
       ${rttRow}
     </div>
   `;

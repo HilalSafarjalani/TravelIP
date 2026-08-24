@@ -7,9 +7,25 @@ cold-vs-warm behavior) is exercised for real against a temp SQLite file.
 
 from __future__ import annotations
 
+import socket
+
 import pytest
 
 from backend.geo import GeoService, classify_ip
+
+
+@pytest.fixture(autouse=True)
+def no_real_dns(monkeypatch):
+    """Reverse DNS (used for private/cgnat hops) defaults to failing
+    instantly in every test here -- none of our test IPs have real PTR
+    records, and these tests must stay offline regardless. Individual tests
+    can still override this with their own monkeypatch.setattr call.
+    """
+
+    def _fail(_ip):
+        raise socket.herror("no reverse record")
+
+    monkeypatch.setattr(socket, "gethostbyaddr", _fail)
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +176,32 @@ async def test_fallback_used_when_batch_fails_for_an_ip(temp_db):
     assert result["1.2.3.4"]["source"] == "ipwho.is"
     assert result["1.2.3.4"]["city"] == "Ashburn"
     assert result["1.2.3.4"]["asn"] == "AS14618"
+
+
+@pytest.mark.asyncio
+async def test_private_ip_gets_reverse_dns_hostname_when_available(temp_db, monkeypatch):
+    monkeypatch.setattr(socket, "gethostbyaddr", lambda ip: ("core1.par1.example.net", [], [ip]))
+    client = FakeClient()
+    geo = GeoService(client)
+
+    result = await geo.lookup_many(["10.20.20.1"])
+
+    assert result["10.20.20.1"]["kind"] == "private"
+    assert result["10.20.20.1"]["reverse"] == "core1.par1.example.net"
+    # Reverse DNS gives a hint, never coordinates -- pinning a location is
+    # main.py's job (hop 1 only), not something geo.py does on its own.
+    assert result["10.20.20.1"]["lat"] is None
+    assert result["10.20.20.1"]["inferred"] is False
+
+
+@pytest.mark.asyncio
+async def test_private_ip_reverse_dns_failure_is_swallowed(temp_db):
+    client = FakeClient()
+    geo = GeoService(client)
+
+    result = await geo.lookup_many(["192.168.1.1"])
+
+    assert result["192.168.1.1"]["reverse"] is None
 
 
 @pytest.mark.asyncio

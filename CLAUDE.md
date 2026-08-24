@@ -78,7 +78,14 @@ is no separate lint/typecheck command.
     No geo info yet.
   - `event: geo` — once per hop, when that hop's IP finishes geolocating
     (fired from a concurrent task per hop, so `geo` events can arrive
-    out of order relative to `hop`/other hops).
+    out of order relative to `hop`/other hops). Hop 1 is special-cased in
+    `_geo_lookup_and_queue`: if it's not a public IP (almost always true —
+    it's your own router), its lat/lon/city/etc are pinned to the trace
+    origin's already-known location and `inferred: true` is set on the geo
+    payload, so the frontend can show/plot it while making clear it's an
+    assumption, not a measurement. Every other private/cgnat hop instead
+    gets a best-effort reverse DNS lookup (see `geo.py`) — no coordinates,
+    but `reverse` may carry a hostname hint.
   - `event: done` — once, when the trace subprocess exits and all pending
     geo lookups have settled. Trace history is saved to SQLite just before
     this fires.
@@ -108,10 +115,13 @@ is no separate lint/typecheck command.
 - `geo.py` — IP geolocation pipeline: classify each IP as
   `private`/`cgnat`/`public`/`unknown` first (only `public` IPs ever hit a
   geo provider — see `classify_ip`'s docstring for why CGNAT is called out
-  separately from private), check the SQLite cache (30-day TTL, cache hits
-  never touch the network), batch-lookup the rest via ip-api.com (rate
-  limited to 45 calls/min), falling back to ipwho.is per-IP for anything the
-  batch call missed.
+  separately from private). Private/cgnat IPs instead get a best-effort
+  reverse DNS (PTR) lookup (`_reverse_dns`, 1.5s timeout, never cached —
+  a private IP's meaning is specific to whatever network it was seen on).
+  Public IPs check the SQLite cache (30-day TTL, cache hits never touch the
+  network), batch-lookup the rest via ip-api.com (rate limited to 45
+  calls/min), falling back to ipwho.is per-IP for anything the batch call
+  missed.
 
 - `validation.py` — validates/normalizes the user-supplied target before
   it's used to build subprocess argv. Subprocess is invoked with
